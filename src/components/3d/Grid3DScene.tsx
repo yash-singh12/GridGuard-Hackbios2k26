@@ -13,70 +13,52 @@ interface Grid3DSceneProps {
   onSelectTransformer: (id: string) => void
 }
 
-// Fixed positions for transformers in the 3D space
+// ─── Layout constants (matching v2 HTML) ─────────────────────────────────────
+// Transformer x positions: [-15, -5, 5, 15], z = -3 (same as HTML TX array)
+const TX_X = [-15, -5, 5, 15]
+
 const TR_POSITIONS: Record<string, [number, number, number]> = {
-  'T-01': [-18, 2.0, -8],
-  'T-02': [-6, 2.0, -8],
-  'T-03': [6, 2.0, -8],
-  'T-04': [18, 2.0, -8]
+  'T-01': [TX_X[0], 0, -3],
+  'T-02': [TX_X[1], 0, -3],
+  'T-03': [TX_X[2], 0, -3],
+  'T-04': [TX_X[3], 0, -3],
 }
 
-const SUBSTATION_POS: [number, number, number] = [0, 6.5, -26]
+// Substation sits behind transformers at z = -16 (matches HTML)
+const SUBSTATION_POS: [number, number, number] = [0, 0, -16]
 
-// Deterministic positioning of 12 consumers around each transformer
-function getConsumerPosition(trId: string, indexInTr: number): [number, number, number] {
-  const [tx, , tz] = TR_POSITIONS[trId] || [0, 2, -8]
-  const row = Math.floor(indexInTr / 4) // 0, 1, 2
-  const col = indexInTr % 4 // 0, 1, 2, 3
-
-  const xOffset = (col - 1.5) * 2.8 + (row % 2 === 1 ? 0.6 : -0.6)
-  const zOffset = 9 + row * 4.2 + (col % 2 === 0 ? 0.4 : -0.4)
-
-  return [tx + xOffset, 0, tz + zOffset]
+// ─── Colour palette (matches CSS variables from v2 HTML dark theme) ─────────
+const COLOR = {
+  scene:  0xdfe6f2,
+  ground: 0xcbd5e6,
+  pad:    0xeef2f9,
+  amber:  0xffc766,
+  ok:     0x46d19a,
+  theft:  0xff2d55, // vibrant unmistakable alert red
+  comm:   0x0284c7, // vibrant electric blue
+  fault:  0x9333ea, // vibrant electric violet
+  wire:   0x8a97b2,
 }
 
-// Helper to create crisp, high-res canvas text sprites in 3D
-function createLabelSprite(text: string, subtext?: string, isMain = false) {
-  const canvas = document.createElement('canvas')
-  canvas.width = 512
-  canvas.height = 128
-  const ctx = canvas.getContext('2d')!
+// ─── Material shorthand ───────────────────────────────────────────────────────
+const M = (color: number, extra?: Record<string, unknown>) =>
+  new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05, ...extra })
 
-  // Background rounded card
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.95)'
-  ctx.beginPath()
-  if (ctx.roundRect) {
-    ctx.roundRect(8, 8, 496, 112, 16)
-  } else {
-    ctx.rect(8, 8, 496, 112)
-  }
-  ctx.fill()
-
-  // Border
-  ctx.strokeStyle = isMain ? '#2563eb' : '#cbd5e1'
-  ctx.lineWidth = isMain ? 4 : 2
-  ctx.stroke()
-
-  // Main text
-  ctx.font = 'bold 36px sans-serif'
-  ctx.fillStyle = isMain ? '#1e3a8a' : '#0f172a'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillText(text, 256, subtext ? 48 : 64)
-
-  // Subtext if present
-  if (subtext) {
-    ctx.font = 'normal 22px sans-serif'
-    ctx.fillStyle = '#64748b'
-    ctx.fillText(subtext, 256, 88)
-  }
-
-  const texture = new THREE.CanvasTexture(canvas)
-  const mat = new THREE.SpriteMaterial({ map: texture, transparent: true })
-  const sprite = new THREE.Sprite(mat)
-  sprite.scale.set(isMain ? 6.5 : 4.5, isMain ? 1.6 : 1.1, 1)
-  return sprite
+// ─── Glowing dot canvas for energy particles ──────────────────────────────────
+function makeGlowCanvas(): HTMLCanvasElement {
+  const gc = document.createElement('canvas')
+  gc.width = gc.height = 64
+  const ctx = gc.getContext('2d')!
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+  g.addColorStop(0,    'rgba(255,255,255,1)')
+  g.addColorStop(0.35, 'rgba(255,255,255,0.55)')
+  g.addColorStop(1,    'rgba(255,255,255,0)')
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, 64, 64)
+  return gc
 }
+
+// ─── React component ──────────────────────────────────────────────────────────
 
 export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
   consumers,
@@ -89,34 +71,59 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
   onSelectTransformer
 }) => {
   const mountRef = useRef<HTMLDivElement>(null)
-  const [hoveredNode, setHoveredNode] = useState<{ id: string; type: 'consumer' | 'transformer'; data?: any; x: number; y: number } | null>(null)
+  const [hoveredNode, setHoveredNode] = useState<{
+    id: string
+    type: 'consumer' | 'transformer'
+    data?: any
+    x: number
+    y: number
+  } | null>(null)
 
-  // Camera animation target
   const cameraRef = useRef<{
     pos: THREE.Vector3
     target: THREE.Vector3
     isTransitioning: boolean
   }>({
-    pos: new THREE.Vector3(0, 24, 26),
+    pos: new THREE.Vector3(0, 15, 29),
     target: new THREE.Vector3(0, 1, 0),
     isTransitioning: false
   })
 
-  // Keep references to 3D objects for dynamic color/pulse updates
-  const consumerMeshesRef = useRef<Map<string, { group: THREE.Group; meterMesh: THREE.Mesh; beaconMesh?: THREE.Mesh }>>(new Map())
-  const transformerMeshesRef = useRef<Map<string, { group: THREE.Group; auraMesh: THREE.Mesh }>>(new Map())
-  const particleSystemRef = useRef<{ points: THREE.Points; curves: THREE.QuadraticBezierCurve3[]; offsets: Float32Array } | null>(null)
+  const onSelectConsumerRef = useRef(onSelectConsumer)
+  const onSelectTransformerRef = useRef(onSelectTransformer)
+  useEffect(() => {
+    onSelectConsumerRef.current = onSelectConsumer
+    onSelectTransformerRef.current = onSelectTransformer
+  }, [onSelectConsumer, onSelectTransformer])
+
+  // Pale Peach / Warm Apricot & Linen light palette
+  const CAT_COLORS: Record<string, { wall: number; roof: number }> = {
+    res: { wall: 0xfdfbf7, roof: 0xf3c4a5 }, // Residential: Soft linen white (#fdfbf7), Delicate pale peach / warm apricot (#f3c4a5)
+    com: { wall: 0xf8f9fa, roof: 0xdfb496 }, // Commercial: Clean linen pearl (#f8f9fa), Soft apricot stone (#dfb496)
+    ind: { wall: 0xf5f6f8, roof: 0xd2a88a }, // Industrial: Linen mist (#f5f6f8), Soft warm clay (#d2a88a)
+  }
+
+  const consumerMeshesRef = useRef<
+    Map<string, { group: THREE.Group; meterMesh: THREE.Mesh; houseMeshes: THREE.Mesh[]; cat: string }>
+  >(new Map())
+  const transformerMeshesRef = useRef<Map<string, { group: THREE.Group }>>(
+    new Map()
+  )
+  const particleSystemRef = useRef<{
+    points: THREE.Points
+    curves: THREE.QuadraticBezierCurve3[]
+    offsets: Float32Array
+    speeds: Float32Array
+  } | null>(null)
 
   const latestReadings = React.useMemo(() => {
     const map = new Map<string, Reading>()
-    for (const r of readings) {
-      map.set(r.id, r)
-    }
+    for (const r of readings) map.set(r.id, r)
     return map
   }, [readings])
 
   const handleResetCamera = useCallback(() => {
-    cameraRef.current.pos.set(0, 26, 28)
+    cameraRef.current.pos.set(0, 15, 29)
     cameraRef.current.target.set(0, 1, 0)
     cameraRef.current.isTransitioning = true
   }, [])
@@ -131,8 +138,8 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
     if (selectedConsumerId) {
       const entry = consumerMeshesRef.current.get(selectedConsumerId)
       if (entry) {
-        const pos = entry.group.position
-        focusNode(pos.x, pos.y, pos.z, 7)
+        const p = entry.group.position
+        focusNode(p.x, p.y, p.z, 7)
       }
     }
   }, [selectedConsumerId, focusNode])
@@ -140,414 +147,296 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
   useEffect(() => {
     if (selectedTransformerId) {
       const pos = TR_POSITIONS[selectedTransformerId]
-      if (pos) {
-        focusNode(pos[0], pos[1], pos[2], 12)
-      }
+      if (pos) focusNode(pos[0], pos[1], pos[2], 12)
     }
   }, [selectedTransformerId, focusNode])
 
+  // ── Main Three.js setup ─────────────────────────────────────────────────────
   useEffect(() => {
     const container = mountRef.current
     if (!container) return
 
-    const width = container.clientWidth
+    const width  = container.clientWidth
     const height = container.clientHeight
 
-    // 1. Scene, Camera, Renderer
+    // Scene
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0xf1f5f9) // Soft slate daylight
-    scene.fog = new THREE.FogExp2(0xf1f5f9, 0.014)
+    scene.background = new THREE.Color(COLOR.scene)
+    scene.fog = new THREE.Fog(COLOR.scene, 60, 120)
 
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 200)
+    // Camera (FOV 40 matches v2 HTML)
+    const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 240)
     camera.position.copy(cameraRef.current.pos)
     camera.lookAt(cameraRef.current.target)
 
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false,
-      powerPreference: 'high-performance',
-      precision: 'mediump'
-    })
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(width, height)
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
-    renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.05
     container.appendChild(renderer.domElement)
 
-    // 2. Daytime Studio Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 2.0)
-    scene.add(ambientLight)
+    // Lighting (hemisphere + directional, same as v2 HTML)
+    const hemi = new THREE.HemisphereLight(0xdfe6ff, 0x1a2340, 1)
+    const moon = new THREE.DirectionalLight(0xffffff, 0.8)
+    moon.position.set(-10, 22, 14)
+    scene.add(hemi, moon)
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 2.4)
-    dirLight.position.set(35, 55, 30)
-    scene.add(dirLight)
+    // Floor
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(220, 220),
+      new THREE.MeshStandardMaterial({ color: COLOR.ground, roughness: 1 })
+    )
+    floor.rotation.x = -Math.PI / 2
+    scene.add(floor)
 
-    const skyFillLight = new THREE.HemisphereLight(0xffffff, 0xe2e8f0, 1.2)
-    scene.add(skyFillLight)
-
-    // 3. Clean Architectural Floor
-    const floorGeo = new THREE.PlaneGeometry(120, 120)
-    const floorMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.9 })
-    const floorMesh = new THREE.Mesh(floorGeo, floorMat)
-    floorMesh.rotation.x = -Math.PI / 2
-    floorMesh.position.y = -0.05
-    scene.add(floorMesh)
-
-    const gridHelper = new THREE.GridHelper(100, 50, 0xcbd5e1, 0xe2e8f0)
-    gridHelper.position.y = -0.04
-    scene.add(gridHelper)
-
-    // 4. Procedural Substation (High-Voltage 33kV Power Source)
-    const substationGroup = new THREE.Group()
-    substationGroup.position.set(...SUBSTATION_POS)
-
-    const gantryMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.6, roughness: 0.3 })
-    const towerGeo = new THREE.BoxGeometry(0.6, 9, 0.6)
-
-    const leftTower = new THREE.Mesh(towerGeo, gantryMat)
-    leftTower.position.set(-6, 0, 0)
-    const rightTower = new THREE.Mesh(towerGeo, gantryMat)
-    rightTower.position.set(6, 0, 0)
-    const crossBeam = new THREE.Mesh(new THREE.BoxGeometry(13, 0.6, 0.6), gantryMat)
-    crossBeam.position.set(0, 4.2, 0)
-    substationGroup.add(leftTower, rightTower, crossBeam)
-
-    // Substation Transformer Units
-    const subTrMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.3, roughness: 0.4 })
-    for (let i = -2; i <= 2; i += 2) {
-      const trBox = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.4, 3, 16), subTrMat)
-      trBox.position.set(i * 2.2, -2.5, 0)
-      substationGroup.add(trBox)
-
-      const insGeo = new THREE.CylinderGeometry(0.2, 0.3, 1.2, 8)
-      const insMat = new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.2 })
-      const ins = new THREE.Mesh(insGeo, insMat)
-      ins.position.set(i * 2.2, -0.6, 0)
-      substationGroup.add(ins)
+    // ── Substation (mirrors HTML sb group) ──────────────────────────────────
+    const sb = new THREE.Group()
+    sb.position.set(0, 0, -16)
+    const sbAdd = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
+      const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); sb.add(m); return m
     }
-
-    // 3D Floating Substation Label Sprite
-    const subLabel = createLabelSprite('SUBSTATION (33kV / 11kV)', 'Grid Entry Point · 50.0 Hz', true)
-    subLabel.position.set(0, 6.8, 0)
-    substationGroup.add(subLabel)
-
-    // Subtle Frequency Ring
-    const freqRingGeo = new THREE.TorusGeometry(8, 0.06, 16, 64)
-    const freqRingMat = new THREE.MeshBasicMaterial({ color: 0x2563eb, transparent: true, opacity: 0.35 })
-    const freqRing = new THREE.Mesh(freqRingGeo, freqRingMat)
-    freqRing.rotation.x = Math.PI / 2
-    freqRing.position.set(0, 4.5, 0)
-    substationGroup.add(freqRing)
-
-    scene.add(substationGroup)
-
-    // 5. Feeders & Catenary Cables
-    const feederCurves: THREE.QuadraticBezierCurve3[] = []
-    const feederMaterial = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.4 })
-
-    Object.entries(TR_POSITIONS).forEach(([trId, trPos]) => {
-      const start = new THREE.Vector3(SUBSTATION_POS[0] + (trPos[0] * 0.25), SUBSTATION_POS[1] + 4, SUBSTATION_POS[2])
-      const end = new THREE.Vector3(trPos[0], trPos[1] + 2.5, trPos[2])
-      const mid = new THREE.Vector3(
-        (start.x + end.x) / 2,
-        Math.min(start.y, end.y) - 1.5,
-        (start.z + end.z) / 2
-      )
-
-      const curve = new THREE.QuadraticBezierCurve3(start, mid, end)
-      feederCurves.push(curve)
-
-      const tubeGeo = new THREE.TubeGeometry(curve, 32, 0.1, 8, false)
-      const tubeMesh = new THREE.Mesh(tubeGeo, feederMaterial)
-      scene.add(tubeMesh)
+    sbAdd(new THREE.BoxGeometry(17, 0.15, 5), M(0x3a465f), 0, 0.08, 0)
+    ;[-3.6, 0, 3.6].forEach(x => {
+      sbAdd(new THREE.CylinderGeometry(1.1, 1.1, 3.4, 24), M(0x7a869d), x, 1.8, 0)
+      sbAdd(new THREE.CylinderGeometry(0.14, 0.14, 0.9, 8), M(0x4cc3ff), x, 4.1, 0)
     })
+    ;[-8, 8].forEach(x => sbAdd(new THREE.BoxGeometry(0.4, 6, 0.4), M(0x5d6a85), x, 3, 0))
+    sbAdd(new THREE.BoxGeometry(16.4, 0.25, 0.25), M(0x5d6a85), 0, 6, 0)
+    scene.add(sb)
 
-    // 6. Secondary Distribution Drop Lines (Transformers -> Consumers)
-    const dropCurves: THREE.QuadraticBezierCurve3[] = []
-    const dropMaterial = new THREE.MeshBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.6 })
-
-    consumers.forEach(consumer => {
-      const trPos = TR_POSITIONS[consumer.tr] || [0, 2, -8]
-      const indexInTr = parseInt(consumer.id.split('-')[1] || '1', 10) - 1
-      const cPos = getConsumerPosition(consumer.tr, indexInTr % 12)
-
-      const start = new THREE.Vector3(trPos[0], trPos[1] + 1.2, trPos[2])
-      const end = new THREE.Vector3(cPos[0], cPos[1] + 1.1, cPos[2])
-      const mid = new THREE.Vector3((start.x + end.x) / 2, Math.min(start.y, end.y) + 0.4, (start.z + end.z) / 2)
-
-      const curve = new THREE.QuadraticBezierCurve3(start, mid, end)
-      dropCurves.push(curve)
-
-      const tubeGeo = new THREE.TubeGeometry(curve, 16, 0.035, 6, false)
-      const tubeMesh = new THREE.Mesh(tubeGeo, dropMaterial)
-      scene.add(tubeMesh)
-    })
-
-    // 7. Instanced Energy Particles moving along all curves
-    const totalCurves = [...feederCurves, ...dropCurves]
-    const particlesPerCurve = 4
-    const totalParticles = totalCurves.length * particlesPerCurve
-
-    const particleGeo = new THREE.BufferGeometry()
-    const particlePositions = new Float32Array(totalParticles * 3)
-    const particleColors = new Float32Array(totalParticles * 3)
-    const particleOffsets = new Float32Array(totalParticles)
-
-    for (let i = 0; i < totalParticles; i++) {
-      particleOffsets[i] = Math.random()
-      particleColors[i * 3] = 0.14 // Electric Blue
-      particleColors[i * 3 + 1] = 0.38
-      particleColors[i * 3 + 2] = 0.92
-    }
-
-    particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3))
-    particleGeo.setAttribute('color', new THREE.BufferAttribute(particleColors, 3))
-
-    const particleMat = new THREE.PointsMaterial({
-      size: 0.4,
-      vertexColors: true,
+    // ── Particle material (glowing amber dot) ────────────────────────────────
+    const pm = new THREE.PointsMaterial({
+      map: new THREE.CanvasTexture(makeGlowCanvas()),
+      size: 0.75,
+      color: new THREE.Color(COLOR.amber),
       transparent: true,
-      opacity: 0.9
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
     })
 
-    const particleSystem = new THREE.Points(particleGeo, particleMat)
-    scene.add(particleSystem)
-    particleSystemRef.current = { points: particleSystem, curves: totalCurves, offsets: particleOffsets }
+    const wireMat = new THREE.LineBasicMaterial({ color: COLOR.wire, transparent: true, opacity: 0.75 })
 
-    // 8. Procedural Distribution Transformers (T-01 to T-04)
-    Object.entries(TR_POSITIONS).forEach(([trId, trPos]) => {
-      const trGroup = new THREE.Group()
-      trGroup.position.set(...trPos)
-      trGroup.userData = { id: trId, type: 'transformer' }
+    const allCurves: THREE.QuadraticBezierCurve3[] = []
+    const allSpeeds: number[] = []
+    const FEEDER_N = 5
+    const DROP_N   = 2
 
-      // Concrete mounting pad
-      const padGeo = new THREE.BoxGeometry(3.4, 0.4, 3.4)
-      const padMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.8 })
-      const padMesh = new THREE.Mesh(padGeo, padMat)
-      padMesh.position.y = -1.8
-      trGroup.add(padMesh)
+    // ── Transformer poles + concrete pads + feeder cables ───────────────────
+    const hits: THREE.Object3D[] = []
 
-      // Main transformer tank
-      const tankGeo = new THREE.CylinderGeometry(1.0, 1.0, 2.2, 16)
-      const tankMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.3, roughness: 0.5 })
-      const tankMesh = new THREE.Mesh(tankGeo, tankMat)
-      trGroup.add(tankMesh)
+    TX_X.forEach((x, ti) => {
+      const trId = `T-0${ti + 1}`
 
-      // Cooling fins
-      const finGeo = new THREE.BoxGeometry(0.08, 1.8, 1.8)
-      const finMat = new THREE.MeshStandardMaterial({ color: 0x334155 })
-      for (let angle = 0; angle < Math.PI; angle += Math.PI / 4) {
-        const fin = new THREE.Mesh(finGeo, finMat)
-        fin.rotation.y = angle
-        trGroup.add(fin)
+      // Concrete pad at scene level
+      const padMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(9.2, 0.08, 14.2),
+        new THREE.MeshStandardMaterial({ color: COLOR.pad, roughness: 1 })
+      )
+      padMesh.position.set(x, 0.04, 3.8)
+      scene.add(padMesh)
+
+      // Pole group
+      const p = new THREE.Group()
+      p.position.set(x, 0, -3)
+      p.userData = { id: trId, type: 'transformer' }
+      const pAdd = (geo: THREE.BufferGeometry, mat: THREE.Material, px: number, py: number, pz: number) => {
+        const m = new THREE.Mesh(geo, mat); m.position.set(px, py, pz); p.add(m); return m
       }
+      pAdd(new THREE.CylinderGeometry(0.13, 0.16, 4.4, 10), M(0x75614a), 0, 2.2, 0)
+      pAdd(new THREE.BoxGeometry(3.2, 0.12, 0.12), M(0x75614a), 0, 4.1, 0)
+      pAdd(new THREE.CylinderGeometry(0.42, 0.42, 0.95, 20), M(0x8c97ad), 0, 3.3, 0.5)
+      pAdd(new THREE.CylinderGeometry(0.12, 0.12, 0.35, 8), M(0x4cc3ff), 0, 3.9, 0.5)
+      ;[-1.05, -0.35, 0.35, 1.05].forEach(dx => pAdd(new THREE.CylinderGeometry(0.06, 0.06, 0.2, 6), M(0x4cc3ff), dx, 4.25, 0))
 
-      // Bushings
-      for (let b = -0.5; b <= 0.5; b += 0.5) {
-        const bGeo = new THREE.CylinderGeometry(0.12, 0.16, 0.8, 8)
-        const bMat = new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.3 })
-        const bMesh = new THREE.Mesh(bGeo, bMat)
-        bMesh.position.set(b, 1.4, 0)
-        trGroup.add(bMesh)
+      scene.add(p)
+      transformerMeshesRef.current.set(trId, { group: p })
+
+      // Feeder cable: substation → transformer
+      const a = new THREE.Vector3(x * 0.5, 6, -16)
+      const b = new THREE.Vector3(x, 4.3, -3)
+      const feederCurve = new THREE.QuadraticBezierCurve3(a, new THREE.Vector3((a.x + b.x) / 2, 3.5, -9.5), b)
+      scene.add(new THREE.Mesh(new THREE.TubeGeometry(feederCurve, 40, 0.06, 6, false), M(0x66738a)))
+      allCurves.push(feederCurve)
+      for (let i = 0; i < FEEDER_N; i++) allSpeeds.push(0.10)
+
+      // Consumer buildings in 3×4 grid
+      for (let r = 0; r < 3; r++) {
+        for (let k = 0; k < 4; k++) {
+          const linearIdx = ti * 12 + r * 4 + k
+          const consumer = consumers[linearIdx]
+          if (!consumer) continue
+
+          const cat: 'res' | 'com' | 'ind' = ti < 3 ? 'res' : (r < 2 ? 'com' : 'ind')
+          const mx = x + (k - 1.5) * 2.2
+          const mz = 2 + r * 3.2 + (k % 2 === 1 ? 0.5 : 0)
+
+          const g = new THREE.Group()
+          g.position.set(mx, 0, mz)
+          g.userData = { id: consumer.id, type: 'consumer', consumer }
+
+          const wmat = new THREE.MeshBasicMaterial({ color: COLOR.amber })
+          // House body meshes — tracked so we can recolour the whole house on alert
+          const houseMeshes: THREE.Mesh[] = []
+          const part = (geo: THREE.BufferGeometry, mat: THREE.Material, px: number, py: number, pz: number) => {
+            const m = new THREE.Mesh(geo, mat)
+            m.position.set(px, py, pz)
+            m.userData = { id: consumer.id, type: 'consumer', consumer }
+            g.add(m); hits.push(m); houseMeshes.push(m); return m
+          }
+          const win = (wx: number, wy: number, wz: number, ww: number, wh: number) => {
+            const m = new THREE.Mesh(new THREE.PlaneGeometry(ww, wh), wmat)
+            m.position.set(wx, wy, wz); g.add(m)
+          }
+
+          if (cat === 'res') {
+            part(new THREE.BoxGeometry(1.6, 1.1, 1.5), M(CAT_COLORS.res.wall), 0, 0.55, 0)
+            const rm = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.15, 1.7, 3), M(CAT_COLORS.res.roof))
+            rm.position.set(0, 1.42, 0); rm.rotation.x = -Math.PI / 2; rm.scale.set(1, 1, 0.55)
+            rm.userData = { id: consumer.id, type: 'consumer', consumer }; g.add(rm); hits.push(rm); houseMeshes.push(rm)
+            win(-0.4, 0.65, 0.76, 0.34, 0.34); win(0.4, 0.65, 0.76, 0.34, 0.34)
+          } else if (cat === 'com') {
+            part(new THREE.BoxGeometry(1.7, 1.9, 1.6), M(CAT_COLORS.com.wall), 0, 0.95, 0)
+            part(new THREE.BoxGeometry(1.8, 0.14, 1.7), M(CAT_COLORS.com.roof), 0, 1.97, 0)
+            ;[0.6, 1.3].forEach(y => [-0.45, 0.45].forEach(wx => win(wx, y, 0.81, 0.5, 0.4)))
+          } else {
+            part(new THREE.BoxGeometry(2.3, 1.1, 1.8), M(CAT_COLORS.ind.wall), 0, 0.55, 0)
+            part(new THREE.BoxGeometry(2.3, 0.35, 1.8), M(CAT_COLORS.ind.roof), 0, 1.27, 0)
+            part(new THREE.CylinderGeometry(0.16, 0.2, 1.2, 10), M(CAT_COLORS.ind.roof), 0.8, 1.8, -0.4)
+            ;[-0.7, 0, 0.7].forEach(wx => win(wx, 0.7, 0.91, 0.4, 0.3))
+          }
+
+          const doorZ = cat === 'res' ? 0.76 : cat === 'com' ? 0.81 : 0.91
+          const door = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.12), M(0x8a7768))
+          door.position.set(0, 0.2, doorZ); g.add(door)
+
+          // Smart meter LED (tracked for colour updates)
+          const ledMat = new THREE.MeshBasicMaterial({ color: COLOR.ok })
+          const ledMesh = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.08), ledMat)
+          ledMesh.position.set(0, 0.2, doorZ + 0.07); g.add(ledMesh)
+
+          // Selection ring
+          const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, side: THREE.DoubleSide })
+          const ring = new THREE.Mesh(new THREE.RingGeometry(1.3, 1.5, 40), ringMat)
+          ring.rotation.x = -Math.PI / 2; ring.position.y = 0.1; ring.visible = false; g.add(ring)
+
+          scene.add(g)
+          consumerMeshesRef.current.set(consumer.id, { group: g, meterMesh: ledMesh, houseMeshes, cat })
+
+          // Drop wire: transformer → house
+          const sa = new THREE.Vector3(x + (k - 1.5) * 0.7, 4.15, -3)
+          const sbp = new THREE.Vector3(mx, 1.4, mz - 0.85)
+          const sc = new THREE.QuadraticBezierCurve3(sa, new THREE.Vector3((sa.x + sbp.x) / 2, 1.7, (sa.z + sbp.z) / 2), sbp)
+          scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(sc.getPoints(16)), wireMat))
+          allCurves.push(sc)
+          for (let i = 0; i < DROP_N; i++) allSpeeds.push(0.30)
+        }
       }
-
-      // 3D Floating Transformer Label Sprite
-      const trLabel = createLabelSprite(trId, 'Distribution DTU')
-      trLabel.position.set(0, 3.2, 0)
-      trGroup.add(trLabel)
-
-      // Ground Aura Ring
-      const auraGeo = new THREE.RingGeometry(1.8, 2.1, 32)
-      const auraMat = new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide, transparent: true, opacity: 0.8 })
-      const auraMesh = new THREE.Mesh(auraGeo, auraMat)
-      auraMesh.rotation.x = Math.PI / 2
-      auraMesh.position.y = -1.78
-      trGroup.add(auraMesh)
-
-      scene.add(trGroup)
-      transformerMeshesRef.current.set(trId, { group: trGroup, auraMesh })
     })
 
-    // 9. Procedural 3D Consumer Buildings & Mounted Smart Meters
-    consumers.forEach(c => {
-      const indexInTr = parseInt(c.id.split('-')[1] || '1', 10) - 1
-      const pos = getConsumerPosition(c.tr, indexInTr % 12)
-
-      const cGroup = new THREE.Group()
-      cGroup.position.set(...pos)
-      cGroup.userData = { id: c.id, type: 'consumer', consumer: c }
-
-      const wallMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.8 })
-      const roofMat = new THREE.MeshStandardMaterial({
-        color: c.cat === 'Industrial' ? 0x64748b : c.cat === 'Commercial' ? 0x0284c7 : c.cat === 'Agricultural' ? 0x16a34a : 0xb45309,
-        roughness: 0.6
-      })
-
-      if (c.cat === 'Commercial') {
-        const baseBox = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.2, 1.8), wallMat)
-        baseBox.position.y = 1.1
-        const topBox = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.8, 1.4), roofMat)
-        topBox.position.y = 2.6
-        cGroup.add(baseBox, topBox)
-      } else if (c.cat === 'Industrial') {
-        const shed = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.4, 2.0), wallMat)
-        shed.position.y = 0.7
-        const roof = new THREE.Mesh(new THREE.ConeGeometry(1.5, 0.8, 4), roofMat)
-        roof.position.y = 1.8
-        roof.rotation.y = Math.PI / 4
-        cGroup.add(shed, roof)
-      } else if (c.cat === 'Agricultural') {
-        const shed = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 1.4), wallMat)
-        shed.position.y = 0.5
-        const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1.4, 12), roofMat)
-        tank.position.set(1.1, 0.7, 0)
-        cGroup.add(shed, tank)
-      } else {
-        const walls = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.2, 1.6), wallMat)
-        walls.position.y = 0.6
-        const roof = new THREE.Mesh(new THREE.ConeGeometry(1.3, 0.8, 4), roofMat)
-        roof.position.y = 1.6
-        roof.rotation.y = Math.PI / 4
-        cGroup.add(walls, roof)
-      }
-
-      // Smart Meter Box mounted on the front wall
-      const meterGeo = new THREE.BoxGeometry(0.3, 0.45, 0.2)
-      const meterMat = new THREE.MeshStandardMaterial({ color: 0x10b981, roughness: 0.3 })
-      const meterMesh = new THREE.Mesh(meterGeo, meterMat)
-      meterMesh.position.set(0, 0.7, 0.95)
-      cGroup.add(meterMesh)
-
-      // Alert Warning Pillar
-      const beaconGeo = new THREE.CylinderGeometry(0.08, 0.25, 12, 16)
-      const beaconMat = new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.65 })
-      const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat)
-      beaconMesh.position.set(0, 6.0, 0)
-      beaconMesh.visible = false
-      cGroup.add(beaconMesh)
-
-      scene.add(cGroup)
-      consumerMeshesRef.current.set(c.id, { group: cGroup, meterMesh, beaconMesh })
+    // ── Particle geometry ────────────────────────────────────────────────────
+    const totalParticles = TX_X.length * FEEDER_N + consumers.length * DROP_N
+    const particlePositions = new Float32Array(totalParticles * 3)
+    const offsets = new Float32Array(totalParticles)
+    let pi = 0
+    allCurves.forEach((_, ci) => {
+      const n = ci < TX_X.length ? FEEDER_N : DROP_N
+      for (let p = 0; p < n; p++) { offsets[pi] = p / n; pi++ }
     })
+    const particleGeo = new THREE.BufferGeometry()
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3))
+    const particlePoints = new THREE.Points(particleGeo, pm)
+    particlePoints.frustumCulled = false
+    scene.add(particlePoints)
+    particleSystemRef.current = { points: particlePoints, curves: allCurves, offsets, speeds: new Float32Array(allSpeeds) }
 
-    // 10. Mouse Interaction
+    // ── Mouse interaction ────────────────────────────────────────────────────
     let isDragging = false
-    let prevMouseX = 0
-    let prevMouseY = 0
+    let prevMouseX = 0, prevMouseY = 0, mouseDownX = 0, mouseDownY = 0
     let lastRaycastTime = 0
     const raycaster = new THREE.Raycaster()
     const mouseVector = new THREE.Vector2()
 
     const onMouseDown = (e: MouseEvent) => {
       isDragging = true
-      prevMouseX = e.clientX
-      prevMouseY = e.clientY
+      prevMouseX = mouseDownX = e.clientX
+      prevMouseY = mouseDownY = e.clientY
+      cameraRef.current.isTransitioning = false
     }
 
     const onMouseMove = (e: MouseEvent) => {
       const rect = renderer.domElement.getBoundingClientRect()
-      mouseVector.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
-      mouseVector.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+      mouseVector.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1
+      mouseVector.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1
 
       if (isDragging) {
-        cameraRef.current.isTransitioning = false
         const dx = e.clientX - prevMouseX
         const dy = e.clientY - prevMouseY
-        prevMouseX = e.clientX
-        prevMouseY = e.clientY
-
+        prevMouseX = e.clientX; prevMouseY = e.clientY
         if (e.buttons === 1) {
-          const angleX = -dx * 0.005
-          const angleY = -dy * 0.005
+          const angleX = -dx * 0.005, angleY = -dy * 0.005
           const offset = camera.position.clone().sub(cameraRef.current.target)
-
           const radius = offset.length()
-          let theta = Math.atan2(offset.x, offset.z) + angleX
+          const theta = Math.atan2(offset.x, offset.z) + angleX
           let phi = Math.acos(Math.max(-0.99, Math.min(0.99, offset.y / radius))) + angleY
           phi = Math.max(0.1, Math.min(Math.PI / 2.1, phi))
-
           camera.position.x = cameraRef.current.target.x + radius * Math.sin(phi) * Math.sin(theta)
           camera.position.y = cameraRef.current.target.y + radius * Math.cos(phi)
           camera.position.z = cameraRef.current.target.z + radius * Math.sin(phi) * Math.cos(theta)
           camera.lookAt(cameraRef.current.target)
         } else if (e.buttons === 2) {
-          const panSpeed = 0.03
-          camera.position.x -= dx * panSpeed
-          cameraRef.current.target.x -= dx * panSpeed
-          camera.position.z -= dy * panSpeed
-          cameraRef.current.target.z -= dy * panSpeed
+          const s = 0.04
+          camera.position.x -= dx * s; cameraRef.current.target.x -= dx * s
+          camera.position.z -= dy * s; cameraRef.current.target.z -= dy * s
         }
       } else {
-        const nowMs = performance.now()
-        if (nowMs - lastRaycastTime < 32) return
-        lastRaycastTime = nowMs
-
+        const now = performance.now()
+        if (now - lastRaycastTime < 32) return
+        lastRaycastTime = now
         raycaster.setFromCamera(mouseVector, camera)
-        const allGroups: THREE.Object3D[] = []
-        consumerMeshesRef.current.forEach(v => allGroups.push(v.group))
-        transformerMeshesRef.current.forEach(v => allGroups.push(v.group))
-
-        const intersects = raycaster.intersectObjects(allGroups, true)
-        if (intersects.length > 0) {
-          let topObj: THREE.Object3D | null = intersects[0].object
-          while (topObj && !topObj.userData.id) {
-            topObj = topObj.parent
-          }
-          if (topObj && topObj.userData.id) {
-            setHoveredNode({
-              id: topObj.userData.id,
-              type: topObj.userData.type,
-              data: topObj.userData.consumer,
-              x: e.clientX,
-              y: e.clientY
-            })
-          } else {
-            setHoveredNode(null)
-          }
+        const ch = raycaster.intersectObjects(hits, false)
+        if (ch.length > 0 && ch[0].object.userData.id) {
+          setHoveredNode({ id: ch[0].object.userData.id, type: ch[0].object.userData.type, data: ch[0].object.userData.consumer, x: e.clientX, y: e.clientY })
         } else {
-          setHoveredNode(null)
+          const trGroups: THREE.Object3D[] = []
+          transformerMeshesRef.current.forEach(v => trGroups.push(v.group))
+          const th = raycaster.intersectObjects(trGroups, true)
+          if (th.length > 0) {
+            let top: THREE.Object3D | null = th[0].object
+            while (top && !top.userData.id) top = top.parent
+            setHoveredNode(top?.userData.id ? { id: top.userData.id, type: 'transformer', x: e.clientX, y: e.clientY } : null)
+          } else { setHoveredNode(null) }
         }
       }
     }
 
-    const onMouseUp = () => {
+    const onMouseUp = (e: MouseEvent) => {
+      const moved = Math.hypot(e.clientX - mouseDownX, e.clientY - mouseDownY)
       isDragging = false
+      if (moved > 5) return
+      const rect = renderer.domElement.getBoundingClientRect()
+      mouseVector.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1
+      mouseVector.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1
+      raycaster.setFromCamera(mouseVector, camera)
+      const ch = raycaster.intersectObjects(hits, false)
+      if (ch.length > 0 && ch[0].object.userData.type === 'consumer') {
+        onSelectConsumerRef.current(ch[0].object.userData.id); return
+      }
+      const trGroups: THREE.Object3D[] = []
+      transformerMeshesRef.current.forEach(v => trGroups.push(v.group))
+      const th = raycaster.intersectObjects(trGroups, true)
+      if (th.length > 0) {
+        let top: THREE.Object3D | null = th[0].object
+        while (top && !top.userData.id) top = top.parent
+        if (top?.userData.type === 'transformer') onSelectTransformerRef.current(top.userData.id)
+      }
     }
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       cameraRef.current.isTransitioning = false
-      const zoomFactor = e.deltaY * 0.04
       const dir = camera.position.clone().sub(cameraRef.current.target)
-      const newLen = Math.max(6, Math.min(65, dir.length() + zoomFactor))
-      dir.setLength(newLen)
+      dir.setLength(Math.max(5, Math.min(60, dir.length() + e.deltaY * 0.04)))
       camera.position.copy(cameraRef.current.target).add(dir)
-    }
-
-    const onClick = (e: MouseEvent) => {
-      const rect = renderer.domElement.getBoundingClientRect()
-      mouseVector.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
-      mouseVector.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
-
-      raycaster.setFromCamera(mouseVector, camera)
-      const allGroups: THREE.Object3D[] = []
-      consumerMeshesRef.current.forEach(v => allGroups.push(v.group))
-      transformerMeshesRef.current.forEach(v => allGroups.push(v.group))
-
-      const intersects = raycaster.intersectObjects(allGroups, true)
-      if (intersects.length > 0) {
-        let topObj: THREE.Object3D | null = intersects[0].object
-        while (topObj && !topObj.userData.id) {
-          topObj = topObj.parent
-        }
-        if (topObj && topObj.userData.id) {
-          if (topObj.userData.type === 'consumer') {
-            onSelectConsumer(topObj.userData.id)
-          } else if (topObj.userData.type === 'transformer') {
-            onSelectTransformer(topObj.userData.id)
-          }
-        }
-      }
     }
 
     const dom = renderer.domElement
@@ -555,149 +444,127 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
     dom.addEventListener('wheel', onWheel, { passive: false })
-    dom.addEventListener('click', onClick)
     dom.addEventListener('contextmenu', e => e.preventDefault())
 
-    // 11. Render Loop
-    let animationFrameId: number
-    let clock = new THREE.Clock()
+    // ── Render loop ──────────────────────────────────────────────────────────
+    let animId: number
+    const clock = new THREE.Clock()
+    const tmpV = new THREE.Vector3()
 
     const animate = () => {
-      animationFrameId = requestAnimationFrame(animate)
-      const delta = clock.getDelta()
-
-      freqRing.rotation.z += 0.015
+      animId = requestAnimationFrame(animate)
+      const dt = Math.min(clock.getDelta(), 0.05)
+      const t  = clock.elapsedTime
 
       if (cameraRef.current.isTransitioning) {
-        camera.position.lerp(cameraRef.current.pos, 0.05)
+        camera.position.lerp(cameraRef.current.pos, 0.06)
         camera.lookAt(cameraRef.current.target)
-        if (camera.position.distanceTo(cameraRef.current.pos) < 0.2) {
-          cameraRef.current.isTransitioning = false
-        }
+        if (camera.position.distanceTo(cameraRef.current.pos) < 0.05) cameraRef.current.isTransitioning = false
       }
 
       if (particleSystemRef.current) {
-        const { points, curves, offsets } = particleSystemRef.current
+        const { points, curves, offsets: offs, speeds } = particleSystemRef.current
         const posAttr = points.geometry.getAttribute('position') as THREE.BufferAttribute
-        const posArray = posAttr.array as Float32Array
-        const numCurves = curves.length
-
-        for (let i = 0; i < offsets.length; i++) {
-          const curveIdx = Math.floor(i / 4) % numCurves
-          const curve = curves[curveIdx]
-          offsets[i] = (offsets[i] + delta * 0.35) % 1.0
-
-          const pt = curve.getPoint(offsets[i])
-          posArray[i * 3] = pt.x
-          posArray[i * 3 + 1] = pt.y
-          posArray[i * 3 + 2] = pt.z
-        }
+        const posArr  = posAttr.array as Float32Array
+        let pi2 = 0
+        curves.forEach((curve, ci) => {
+          const n = ci < TX_X.length ? FEEDER_N : DROP_N
+          for (let p = 0; p < n; p++) {
+            offs[pi2] = (offs[pi2] + speeds[pi2] * dt) % 1
+            curve.getPoint(offs[pi2], tmpV)
+            posArr[pi2 * 3] = tmpV.x; posArr[pi2 * 3 + 1] = tmpV.y; posArr[pi2 * 3 + 2] = tmpV.z
+            pi2++
+          }
+        })
         posAttr.needsUpdate = true
       }
 
+
+
       renderer.render(scene, camera)
     }
-
     animate()
 
     const onResize = () => {
       if (!mountRef.current) return
-      const w = mountRef.current.clientWidth
-      const h = mountRef.current.clientHeight
-      camera.aspect = w / h
-      camera.updateProjectionMatrix()
-      renderer.setSize(w, h)
+      const w = mountRef.current.clientWidth, h = mountRef.current.clientHeight
+      camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h)
     }
     window.addEventListener('resize', onResize)
 
     return () => {
-      cancelAnimationFrame(animationFrameId)
+      cancelAnimationFrame(animId)
       window.removeEventListener('resize', onResize)
       dom.removeEventListener('mousedown', onMouseDown)
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
       dom.removeEventListener('wheel', onWheel)
-      dom.removeEventListener('click', onClick)
-      if (container.contains(renderer.domElement)) {
-        container.removeChild(renderer.domElement)
-      }
+      if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement)
       renderer.dispose()
     }
-  }, [consumers, onSelectConsumer, onSelectTransformer])
+  }, [consumers])
 
-  // Update node colors & alert beacons
+  // ── Colour / alert updates ───────────────────────────────────────────────
   useEffect(() => {
-    // Set of consumers with active alerts right now
     const activeAlertMap = new Map<string, Alert>()
     alerts.forEach(a => activeAlertMap.set(a.consumer, a))
 
     consumers.forEach(c => {
       const entry = consumerMeshesRef.current.get(c.id)
       if (!entry) return
-
       const liveReading = latestReadings.get(c.id)
       const activeAlert = activeAlertMap.get(c.id)
 
-      let colorHex = 0x10b981 // Normal green
-      let isCriticalAlert = false
+      // Determine alert colour (undefined = normal / restore originals)
+      let alertColorHex: number | null = null
 
       if (activeAlert) {
         if (activeAlert.cause === 'Probable theft/tampering' || activeAlert.risk === 'Critical' || activeAlert.risk === 'High') {
-          colorHex = 0xef4444 // Red
-          isCriticalAlert = true
+          alertColorHex = COLOR.theft
         } else if (activeAlert.cause === 'Meter malfunction') {
-          colorHex = 0xf59e0b // Amber
-          isCriticalAlert = true
+          alertColorHex = COLOR.fault
         } else if (activeAlert.cause === 'Communication failure' || liveReading?.comm === 'Offline') {
-          colorHex = 0x0284c7 // Blue/Offline
-          isCriticalAlert = false
+          alertColorHex = COLOR.comm
         } else {
-          colorHex = 0xf59e0b
+          alertColorHex = COLOR.fault
         }
       } else if (liveReading?.status && liveReading.status !== 'Normal') {
-        if (liveReading.status === 'Probable theft/tampering') {
-          colorHex = 0xef4444
-          isCriticalAlert = true
-        } else if (liveReading.status === 'Meter malfunction') {
-          colorHex = 0xf59e0b
-          isCriticalAlert = true
-        } else if (liveReading.status === 'Communication failure' || liveReading.comm === 'Offline') {
-          colorHex = 0x0284c7
+        if (liveReading.status === 'Probable theft/tampering')      alertColorHex = COLOR.theft
+        else if (liveReading.status === 'Meter malfunction')         alertColorHex = COLOR.fault
+        else if (liveReading.status === 'Communication failure' || liveReading.comm === 'Offline') alertColorHex = COLOR.comm
+      }
+
+      // Light defaults for normal houses
+      const defaults = CAT_COLORS[entry.cat] ?? CAT_COLORS.res
+
+      // Tint the whole house or restore default colours (solid, non-blinking)
+      entry.houseMeshes.forEach((mesh, idx) => {
+        const mat = mesh.material as THREE.MeshStandardMaterial
+        if (alertColorHex !== null) {
+          mat.color.setHex(alertColorHex)
+          mat.emissive?.setHex(0x000000)
+          mat.emissiveIntensity = 0
+        } else {
+          // Restore normal colours (alternate wall/roof per mesh index)
+          mat.color.setHex(idx === 0 ? defaults.wall : defaults.roof)
+          mat.emissive?.setHex(0x000000)
+          mat.emissiveIntensity = 0
         }
-      }
+      })
 
-      const mat = entry.meterMesh.material as THREE.MeshStandardMaterial
-      mat.color.setHex(colorHex)
-
-      if (entry.beaconMesh) {
-        entry.beaconMesh.visible = isCriticalAlert
-        const bMat = entry.beaconMesh.material as THREE.MeshBasicMaterial
-        bMat.color.setHex(colorHex)
-      }
-    })
-
-    transformers.forEach(t => {
-      const entry = transformerMeshesRef.current.get(t.id)
-      if (!entry) return
-
-      const lossGap = (t.unexpl - t.gap) / t.input
-      let auraColor = 0x10b981
-      if (lossGap > 0.05) {
-        auraColor = 0xef4444
-      } else if (lossGap > 0.02) {
-        auraColor = 0xf59e0b
-      }
-
-      const mat = entry.auraMesh.material as THREE.MeshBasicMaterial
-      mat.color.setHex(auraColor)
+      // LED dot still tracks the alert colour
+      ;(entry.meterMesh.material as THREE.MeshBasicMaterial).color.setHex(
+        alertColorHex !== null ? alertColorHex : COLOR.ok
+      )
     })
   }, [consumers, latestReadings, transformers, alerts])
 
+  // ── JSX ───────────────────────────────────────────────────────────────────
   return (
-    <div className="relative h-full w-full select-none overflow-hidden bg-slate-100 font-sans">
+    <div className="relative h-full w-full select-none overflow-hidden font-sans" style={{ background: '#dfe6f2' }}>
       <div ref={mountRef} className="h-full w-full cursor-grab active:cursor-grabbing" />
 
-      {/* Clean Floating Quick Controls */}
+      {/* Quick Controls */}
       <div className="pointer-events-auto absolute left-4 top-4 flex flex-wrap items-center gap-2">
         <button
           onClick={handleResetCamera}
@@ -706,7 +573,7 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
           <span>⟲</span> Reset Camera
         </button>
         <button
-          onClick={() => focusNode(SUBSTATION_POS[0], SUBSTATION_POS[1], SUBSTATION_POS[2], 14)}
+          onClick={() => focusNode(SUBSTATION_POS[0], 4, SUBSTATION_POS[2], 14)}
           className="rounded-md border border-slate-300 bg-white/95 px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 transition"
         >
           Substation 33kV
@@ -726,7 +593,7 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
         ))}
       </div>
 
-      {/* Floating 3D Node Tooltip on Hover */}
+      {/* Hover Tooltip */}
       {hoveredNode && (
         <div
           style={{ left: `${hoveredNode.x + 14}px`, top: `${hoveredNode.y - 12}px` }}
@@ -747,12 +614,12 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Status:</span>
-                  <span className="font-semibold text-slate-800">{hoveredNode.data?.d.top}</span>
+                  <span className="font-semibold text-slate-800">{hoveredNode.data?.d?.top}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Anomaly Risk:</span>
-                  <span className={`font-bold ${hoveredNode.data?.d.risk === 'Critical' ? 'text-red-600' : 'text-slate-800'}`}>
-                    {hoveredNode.data?.d.risk} ({hoveredNode.data?.d.anomaly}/100)
+                  <span className={`font-bold ${hoveredNode.data?.d?.risk === 'Critical' ? 'text-red-600' : 'text-slate-800'}`}>
+                    {hoveredNode.data?.d?.risk} ({hoveredNode.data?.d?.anomaly}/100)
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -761,7 +628,7 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
                 </div>
               </div>
               <div className="mt-2 border-t border-slate-100 pt-1 text-[10px] font-semibold text-blue-600">
-                Click to inspect & take action →
+                Click to inspect &amp; take action →
               </div>
             </div>
           ) : (
@@ -770,9 +637,7 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
                 <span className="font-mono font-bold text-slate-800">{hoveredNode.id}</span>
                 <span className="text-[10px] text-slate-500">Distribution Transformer</span>
               </div>
-              <div className="mt-1.5 text-[11px] text-slate-600">
-                Feeder: <span className="font-mono font-medium">F-01</span> · 12 Connected Meters
-              </div>
+              <div className="mt-1.5 text-[11px] text-slate-600">12 Connected Meters</div>
               <div className="mt-1 text-[10px] font-semibold text-blue-600">Click to view energy audit →</div>
             </div>
           )}
@@ -780,7 +645,7 @@ export const Grid3DScene: React.FC<Grid3DSceneProps> = ({
       )}
 
       <div className="pointer-events-none absolute bottom-3 left-4 text-[11px] text-slate-500">
-        Tip: Left-Click to rotate · Scroll to zoom · Click any meter to inspect
+        Tip: Left-click drag to rotate · Scroll to zoom · Click any meter or transformer to inspect
       </div>
     </div>
   )

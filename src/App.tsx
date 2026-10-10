@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, useEffect, type ReactNode } from 'react'
 import { Routes, Route, NavLink, Link, useNavigate, useParams, Navigate } from 'react-router-dom'
 import {
   Download,
@@ -24,6 +24,10 @@ import { HistoryPage } from './pages/HistoryPage'
 import { AIFeedbackDrawer } from './components/investigation/AIFeedbackDrawer'
 import { exportForensicPDF } from './components/investigation/ForensicReportExport'
 import { investigationStore } from './services/investigationCaseStore'
+import { aiFeedback } from './services/aiFeedbackStore'
+import { isLocalStorageAvailable } from './services/storage'
+import { filterAlerts, shouldShowInAlertsFeed } from './services/workflow'
+import { sim } from './sim'
 
 const TONE: Record<string, string> = {
   Normal: 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -118,7 +122,7 @@ const Grid = () => (
         <div key={t.id} className="mb-2 text-xs">
           <b className="font-mono text-blue-700 mr-2">{t.id}:</b>
           {WORLD.A.cons
-            .filter(c => c.tr === t.id && c.d.top !== 'Normal consumption')
+            .filter(c => c.tr === t.id && c.d.top !== 'Normal consumption' && shouldShowInAlertsFeed(c.id))
             .map(c => (
               <Link key={c.id} className="font-mono mr-2 text-blue-600 hover:underline" to={'/consumers/' + c.id}>
                 {c.id} ({c.d.top})
@@ -195,8 +199,39 @@ function Consumers() {
 function Alerts() {
   const { alerts } = useSim()
   const nav = useNavigate()
+  // Re-render instantly when investigation / history stores change so the
+  // investigated item leaves this feed without a manual refresh.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const u1 = investigationStore.subscribe(() => setTick(t => t + 1))
+    const u2 = aiFeedback.subscribe(() => setTick(t => t + 1))
+    return () => {
+      u1()
+      u2()
+    }
+  }, [])
+  const visible = filterAlerts(alerts)
   return (
-    <Card t={`Active Alerts Feed (${alerts.length})`}>
+    <Card t={`Active Alerts Feed (${visible.length})`}>
+      {visible.length === 0 ? (
+        <div className="p-6 text-center text-xs text-slate-500">
+          <p>
+            No pending alerts — investigated items move to Active Investigations, resolved ones to Incident History.
+            To generate new live alerts, inject a scenario from the Live Grid Dashboard.
+          </p>
+          <button
+            onClick={() => {
+              sim.reset()
+              sim.start()
+              investigationStore.resetToSeed()
+              aiFeedback.reset()
+            }}
+            className="mt-3 rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 shadow-xs"
+          >
+            Reset demo data (restore sample alerts)
+          </button>
+        </div>
+      ) : (
       <Table>
         <thead className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-600">
           <tr>
@@ -206,7 +241,7 @@ function Alerts() {
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {alerts.map(a => (
+          {visible.map(a => (
             <tr key={a.id} className="hover:bg-slate-50">
               <td className="p-2.5 font-mono text-slate-500">{a.time}</td>
               <td className="p-2.5 font-mono font-bold text-blue-600">{a.consumer}</td>
@@ -221,6 +256,7 @@ function Alerts() {
                   p
                   onClick={() => {
                     investigationStore.addFromAlert(a)
+                    sim.moveToInvestigation(a.consumer)
                     nav('/investigations')
                   }}
                 >
@@ -231,6 +267,7 @@ function Alerts() {
           ))}
         </tbody>
       </Table>
+      )}
     </Card>
   )
 }
@@ -240,6 +277,9 @@ export default function App() {
   const nav = useNavigate()
   const [q, setQ] = useState('')
   const sim_ = useSim()
+  // If the browser blocks site data, store mutations are in-memory only and
+  // Active Investigations will read 0 after every refresh — say so loudly.
+  const [storageBlocked] = useState(() => !isLocalStorageAvailable())
 
   const set = (k: string, v: string) => setF(p => ({ ...p, [k]: v }))
   const sel = (k: 'risk' | 'tr' | 'cause', o: string[]) => (
@@ -372,6 +412,13 @@ export default function App() {
 
           {/* Master View Area */}
           <div className="p-4">
+            {storageBlocked && (
+              <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 shadow-sm">
+                <span className="font-bold">Persistence unavailable:</span> your browser is blocking site
+                data for this origin, so investigations and history are kept in memory only and will reset
+                to the sample case on refresh. Allow cookies / site data for localhost to keep data across restarts.
+              </div>
+            )}
             <Routes>
               <Route path="/" element={<UnifiedDashboard />} />
               <Route path="/overview" element={<Navigate to="/" replace />} />

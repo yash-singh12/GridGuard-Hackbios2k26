@@ -1,4 +1,5 @@
 import type { IncidentActionLog, OperatorActionType, Cause, Priority } from '../types'
+import { safeGet, safeSet } from './storage'
 
 const STORAGE_KEY = 'gridguard_ai_feedback_logs_v1'
 
@@ -100,24 +101,27 @@ class AIFeedbackStore {
   }
 
   private load() {
-    try {
-      const data = localStorage.getItem(STORAGE_KEY)
-      if (data) {
-        this.logs = JSON.parse(data)
-      } else {
-        this.logs = [...INITIAL_LOGS]
-        this.save()
+    const data = safeGet(STORAGE_KEY)
+    if (data) {
+      try {
+        const parsed = JSON.parse(data)
+        if (Array.isArray(parsed)) {
+          this.logs = parsed
+          return
+        }
+        console.warn('[aiFeedback] stored value is not a list; reseeding.')
+      } catch {
+        console.warn('[aiFeedback] stored value is corrupt; reseeding.')
       }
-    } catch {
-      this.logs = [...INITIAL_LOGS]
     }
+    // Missing, corrupt, or non-list data: fall back to the initial logs.
+    this.logs = [...INITIAL_LOGS]
+    this.save()
   }
 
   private save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.logs))
-    } catch (e) {
-      console.error('Failed to save AI feedback store:', e)
+    if (!safeSet(STORAGE_KEY, JSON.stringify(this.logs))) {
+      console.warn('[aiFeedback] browser storage unavailable; history is in-memory only.')
     }
     this.notify()
   }
@@ -137,6 +141,28 @@ class AIFeedbackStore {
 
   getByConsumer(consumerId: string): IncidentActionLog[] {
     return this.logs.filter(l => l.consumerId === consumerId)
+  }
+
+  getLatestForConsumer(consumerId: string): IncidentActionLog | undefined {
+    return this.logs.find(l => l.consumerId === consumerId)
+  }
+
+  // Terminal states remove an item from Alerts / Investigations into History.
+  isTerminallyClosed(consumerId: string): boolean {
+    const latest = this.getLatestForConsumer(consumerId)
+    return !!latest && (latest.action === 'RESOLVE' || latest.action === 'DISMISS')
+  }
+
+  getTerminalConsumerIds(): Set<string> {
+    const ids = new Set<string>()
+    // latest log per consumer wins (logs are newest-first)
+    const seen = new Set<string>()
+    for (const l of this.logs) {
+      if (seen.has(l.consumerId)) continue
+      seen.add(l.consumerId)
+      if (l.action === 'RESOLVE' || l.action === 'DISMISS') ids.add(l.consumerId)
+    }
+    return ids
   }
 
   add(log: Omit<IncidentActionLog, 'id' | 'timestamp'>): IncidentActionLog {

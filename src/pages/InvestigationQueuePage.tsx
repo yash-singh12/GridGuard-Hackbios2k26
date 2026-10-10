@@ -14,6 +14,7 @@ import {
   ExternalLink
 } from 'lucide-react'
 import { investigationStore, type InvestigationCase, type CaseStatus } from '../services/investigationCaseStore'
+import { aiFeedback } from '../services/aiFeedbackStore'
 import { IncidentActionModal } from '../components/investigation/IncidentActionModal'
 import { api } from '../mock'
 import type { Consumer, OperatorActionType } from '../types'
@@ -24,16 +25,32 @@ export const InvestigationQueuePage: React.FC = () => {
   const [selectedStatus, setSelectedStatus] = useState<string>('ALL')
   const [activeModalConsumer, setActiveModalConsumer] = useState<Consumer | null>(null)
   const [modalAction, setModalAction] = useState<OperatorActionType | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
 
   useEffect(() => {
     setCases(investigationStore.getAll())
     const unsub = investigationStore.subscribe(() => {
       setCases(investigationStore.getAll())
     })
+    const unsub2 = aiFeedback.subscribe(() => {
+      // Resolves / dismissals elsewhere remove cases here instantly.
+      setCases(investigationStore.getAll())
+    })
+    // Another tab mutating localStorage doesn't fire store listeners here.
+    const onExternal = () => setCases(investigationStore.getAll())
+    window.addEventListener('storage', onExternal)
     return () => {
       unsub()
+      unsub2()
+      window.removeEventListener('storage', onExternal)
     }
   }, [])
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   const filteredCases = cases.filter(c => {
     if (selectedStatus === 'ALL') return true
@@ -151,6 +168,17 @@ export const InvestigationQueuePage: React.FC = () => {
             <p className="text-xs mt-1 text-slate-500">
               Go to the <strong>Incident Alerts</strong> tab or <strong>Dashboard</strong> and click "Investigate →" to add cases here.
             </p>
+            <button
+              onClick={() => {
+                investigationStore.restoreSample()
+                setCases(investigationStore.getAll())
+                setSelectedStatus('ALL')
+                setToast('Sample case C-017 restored to Active Investigations.')
+              }}
+              className="mt-3 rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 shadow-xs"
+            >
+              Reload sample case (C-017)
+            </button>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -195,6 +223,20 @@ export const InvestigationQueuePage: React.FC = () => {
                         {c.status === 'Under Review' && <Clock size={11} />}
                         {c.status}
                       </span>
+                      <div className="mt-1.5 flex items-center gap-1" title="Investigation progress: flagged → under review → field action → resolved">
+                        {[1, 2, 3].map(step => {
+                          const stage = c.status === 'Under Review' ? 1 : 2
+                          return (
+                            <span
+                              key={step}
+                              className={`h-1 flex-1 rounded-full ${step <= stage ? 'bg-blue-500' : 'bg-slate-200'}`}
+                            />
+                          )
+                        })}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-slate-400">
+                        {c.status === 'Under Review' ? 'Step 1/3 · Desk audit' : 'Step 2/3 · Field action'}
+                      </div>
                     </td>
 
                     <td className="p-3 font-mono text-slate-600">{c.transformerId}</td>
@@ -228,6 +270,20 @@ export const InvestigationQueuePage: React.FC = () => {
                             Dispatch Squad
                           </button>
                         )}
+                        {c.status !== 'Warning Notice Issued' && (
+                          <button
+                            onClick={() => handleOpenAction(c.consumerId, 'SEND_WARNING')}
+                            className="rounded-md border border-blue-300 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 shadow-xs"
+                          >
+                            Warn
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleOpenAction(c.consumerId, 'DISMISS')}
+                          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-500 hover:bg-slate-50 shadow-xs"
+                        >
+                          Dismiss
+                        </button>
                         <button
                           onClick={() => handleOpenAction(c.consumerId, 'RESOLVE')}
                           className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-700 shadow-xs transition"
@@ -245,6 +301,11 @@ export const InvestigationQueuePage: React.FC = () => {
       </div>
 
       {/* Action Modal for Dispatch / Resolve */}
+      {toast && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-900 shadow-sm">
+          {toast}
+        </div>
+      )}
       {activeModalConsumer && modalAction && (
         <IncidentActionModal
           consumer={activeModalConsumer}
@@ -255,9 +316,18 @@ export const InvestigationQueuePage: React.FC = () => {
             setModalAction(null)
           }}
           onSuccess={() => {
+            const doneId = activeModalConsumer.id
+            const doneAction = modalAction
             setActiveModalConsumer(null)
             setModalAction(null)
             setCases(investigationStore.getAll())
+            setToast(
+              doneAction === 'RESOLVE' || doneAction === 'DISMISS'
+                ? `${doneId} completed and moved to Incident History.`
+                : doneAction === 'DISPATCH_OFFICER'
+                ? `${doneId} status → Field Inspection Dispatched.`
+                : `${doneId} status → Warning Notice Issued.`
+            )
           }}
         />
       )}

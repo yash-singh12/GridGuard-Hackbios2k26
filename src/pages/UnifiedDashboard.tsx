@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useReducer } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Grid3DScene } from '../components/3d/Grid3DScene'
 import { RealDataBridgeModal } from '../components/realdata/RealDataBridgeModal'
@@ -25,6 +25,8 @@ import {
 } from 'lucide-react'
 import { predictRealML, checkMLBackendHealth, type MLPredictResponse } from '../services/realMlClient'
 import { investigationStore } from '../services/investigationCaseStore'
+import { aiFeedback } from '../services/aiFeedbackStore'
+import { filterAlerts, filterConsumers, shouldShowInAlertsFeed } from '../services/workflow'
 
 export const UnifiedDashboard: React.FC = () => {
   const navigate = useNavigate()
@@ -37,6 +39,29 @@ export const UnifiedDashboard: React.FC = () => {
   const [demoStep, setDemoStep] = useState<number | null>(null)
   const [backendOnline, setBackendOnline] = useState<boolean>(false)
   const [realMLResult, setRealMLResult] = useState<MLPredictResponse | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  // Re-render when investigation cases or terminal action logs change so
+  // items move between sections instantly without a manual refresh.
+  const [, bumpStores] = useReducer(x => x + 1, 0)
+
+  useEffect(() => {
+    const un1 = investigationStore.subscribe(() => bumpStores())
+    const un2 = aiFeedback.subscribe(() => bumpStores())
+    // Mutations from another tab only arrive via the storage event.
+    const onExternal = () => bumpStores()
+    window.addEventListener('storage', onExternal)
+    return () => {
+      un1()
+      un2()
+      window.removeEventListener('storage', onExternal)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   useEffect(() => {
     sim.start()
@@ -81,8 +106,33 @@ export const UnifiedDashboard: React.FC = () => {
   }, [selectedConsumerId, latestReading?.p, latestReading?.v, latestReading?.i, currentConsumer.actual, currentConsumer.base, scenario])
 
   const totalPowerKW = (s.readings.slice(-SIM_IDS.length).reduce((sum, r) => sum + (r.p || 0), 0) + 120).toFixed(1)
-  const criticalAlertsCount = s.alerts.filter(a => a.risk === 'Critical' || a.priority === 'P1').length
+  // Status-driven queue: alerts already moved to Active Investigations or
+  // terminally closed (Resolved / Dismissed) leave this section.
+  const visibleAlerts = filterAlerts(s.alerts)
+  const criticalAlertsCount = visibleAlerts.filter(a => a.risk === 'Critical' || a.priority === 'P1').length
+  const queueConsumers = filterConsumers(
+    WORLD.A.cons.filter(c => c.d.top !== 'Normal consumption')
+  ).sort((a, b) => a.d.priority.localeCompare(b.d.priority) || b.d.anomaly - a.d.anomaly)
   const totalLossINR = WORLD.A.cons.reduce((sum, c) => sum + estLoss(c), 0)
+
+  const handleInvestigate = (c: Consumer) => {
+    investigationStore.addFromAlert({
+      id: `AL-${c.id}`,
+      time: new Date().toLocaleTimeString('en-GB'),
+      consumer: c.id,
+      tr: c.tr,
+      event: `Anomaly: ${c.d.top}`,
+      risk: c.d.risk,
+      cause: c.d.top,
+      conf: c.d.conf,
+      score: c.d.anomaly,
+      priority: c.d.priority,
+      status: 'New'
+    })
+    sim.moveToInvestigation(c.id)
+    setToast(`${c.id} moved to Active Investigations (Under Review).`)
+    navigate('/investigations')
+  }
 
   const handleInject = () => {
     sim.inject(selectedConsumerId, scenario)
@@ -138,7 +188,7 @@ export const UnifiedDashboard: React.FC = () => {
         <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
           <div className="text-xs font-medium text-slate-500">Theft & Tamper Alerts</div>
           <div className="mt-1 font-mono text-2xl font-bold text-red-600">{criticalAlertsCount} Critical</div>
-          <div className="text-[11px] text-slate-500">{s.alerts.length} total warnings</div>
+          <div className="text-[11px] text-slate-500">{visibleAlerts.length} total warnings</div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
           <div className="flex items-center justify-between">
@@ -159,6 +209,14 @@ export const UnifiedDashboard: React.FC = () => {
       </div>
 
       {/* Demo Notification Banner (if active) */}
+      {toast && (
+        <div className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-900 shadow-sm">
+          <span>{toast}</span>
+          <button onClick={() => setToast(null)} className="font-semibold hover:underline">
+            Dismiss
+          </button>
+        </div>
+      )}
       {demoStep !== null && (
         <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-900 shadow-sm">
           <div className="flex items-center gap-2">
@@ -225,8 +283,8 @@ export const UnifiedDashboard: React.FC = () => {
             transformers={WORLD.A.tr}
             selectedConsumerId={selectedConsumerId}
             selectedTransformerId={selectedTransformerId}
-            onSelectConsumer={id => setSelectedConsumerId(id)}
-            onSelectTransformer={id => setSelectedTransformerId(id)}
+            onSelectConsumer={setSelectedConsumerId}
+            onSelectTransformer={setSelectedTransformerId}
           />
         </div>
       </div>
@@ -459,10 +517,27 @@ export const UnifiedDashboard: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {WORLD.A.cons
-                .filter(c => c.d.top !== 'Normal consumption')
-                .sort((a, b) => a.d.priority.localeCompare(b.d.priority) || b.d.anomaly - a.d.anomaly)
-                .map(c => (
+              {queueConsumers.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="p-6 text-center text-xs text-slate-500">
+                    Queue clear — all alerts are under investigation or resolved. New anomalies will appear here automatically.
+                    <div>
+                      <button
+                        onClick={() => {
+                          sim.reset()
+                          sim.start()
+                          investigationStore.resetToSeed()
+                          aiFeedback.reset()
+                          setToast('Demo data reset — sample alerts restored.')
+                        }}
+                        className="mt-2 rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 shadow-xs"
+                      >
+                        Reset demo data (restore sample alerts)
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ) : queueConsumers.map(c => (
                   <tr
                     key={c.id}
                     onClick={() => setSelectedConsumerId(c.id)}
@@ -491,20 +566,7 @@ export const UnifiedDashboard: React.FC = () => {
                       <button
                         onClick={e => {
                           e.stopPropagation()
-                          investigationStore.addFromAlert({
-                            id: `AL-${c.id}`,
-                            time: new Date().toLocaleTimeString('en-GB'),
-                            consumer: c.id,
-                            tr: c.tr,
-                            event: `Anomaly: ${c.d.top}`,
-                            risk: c.d.risk,
-                            cause: c.d.top,
-                            conf: c.d.conf,
-                            score: c.d.anomaly,
-                            priority: c.d.priority,
-                            status: 'New'
-                          })
-                          navigate('/investigations')
+                          handleInvestigate(c)
                         }}
                         className="rounded bg-blue-50 border border-blue-200 px-2 py-0.5 text-blue-700 font-semibold hover:bg-blue-100 flex items-center gap-1 transition"
                       >
@@ -528,7 +590,22 @@ export const UnifiedDashboard: React.FC = () => {
           actionType={modalAction}
           isOpen={true}
           onClose={() => setModalAction(null)}
-          onSuccess={() => {}}
+          onSuccess={() => {
+            bumpStores()
+            const status =
+              modalAction === 'DISPATCH_OFFICER'
+                ? 'Field Inspection Dispatched'
+                : modalAction === 'SEND_WARNING'
+                ? 'Warning Notice Issued'
+                : modalAction === 'RESOLVE'
+                ? 'resolved and moved to Incident History'
+                : 'dismissed and moved to Incident History'
+            setToast(
+              modalAction === 'RESOLVE' || modalAction === 'DISMISS'
+                ? `${currentConsumer.id} ${status}.`
+                : `${currentConsumer.id} moved to Active Investigations (${status}).`
+            )
+          }}
         />
       )}
     </div>

@@ -26,8 +26,11 @@ export const HistoryPage: React.FC = () => {
     const unsub = aiFeedback.subscribe(() => {
       setLogs(aiFeedback.getAll())
     })
+    const onExternal = () => setLogs(aiFeedback.getAll())
+    window.addEventListener('storage', onExternal)
     return () => {
       unsub()
+      window.removeEventListener('storage', onExternal)
     }
   }, [])
 

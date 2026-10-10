@@ -167,8 +167,8 @@ export const DigitalTwinLab: React.FC = () => {
             transformers={WORLD.A.tr}
             selectedConsumerId={selectedConsumerId}
             selectedTransformerId={selectedTransformerId}
-            onSelectConsumer={id => setSelectedConsumerId(id)}
-            onSelectTransformer={id => setSelectedTransformerId(id)}
+            onSelectConsumer={setSelectedConsumerId}
+            onSelectTransformer={setSelectedTransformerId}
           />
         </div>
 

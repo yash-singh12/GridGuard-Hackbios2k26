@@ -3,6 +3,7 @@ import type { Consumer, OperatorActionType, Priority } from '../../types'
 import { aiFeedback } from '../../services/aiFeedbackStore'
 import { sim } from '../../sim'
 import { investigationStore } from '../../services/investigationCaseStore'
+import { ensureCaseForConsumer } from '../../services/workflow'
 import { AlertTriangle, Send, ShieldAlert, CheckCircle, X, Shield, FileText, UserCheck } from 'lucide-react'
 
 interface IncidentActionModalProps {
@@ -11,6 +12,8 @@ interface IncidentActionModalProps {
   isOpen: boolean
   onClose: () => void
   onSuccess: () => void
+  // Backend Method-A revenue loss prefilled as the recoverable penalty.
+  suggestedRecovery?: number | null
 }
 
 export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
@@ -18,7 +21,8 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
   actionType,
   isOpen,
   onClose,
-  onSuccess
+  onSuccess,
+  suggestedRecovery
 }) => {
   // Dismiss State
   const [dismissReason, setDismissReason] = useState<any>('Approved Solar Net-Metering')
@@ -38,8 +42,12 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
   const [modus, setModus] = useState('Suspected phase neutral bypass / external shunt wire')
 
   // Resolve State
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [resolveOutcome, setResolveOutcome] = useState<any>('CONFIRMED_THEFT')
-  const [recoveredINR, setRecoveredINR] = useState(12500)
+  const [recoveredINR, setRecoveredINR] = useState(
+    suggestedRecovery != null ? Math.round(suggestedRecovery) : 12500
+  )
   const [recoveredKWh, setRecoveredKWh] = useState(480)
   const [replacementMeter, setReplacementMeter] = useState(`MTR-DLMS-${Math.floor(10000 + Math.random() * 90000)}`)
   const [legalAction, setLegalAction] = useState(true)
@@ -49,6 +57,10 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (isSubmitting) return
+    setIsSubmitting(true)
+    setSubmitError(null)
+    try {
 
     if (actionType === 'DISMISS') {
       aiFeedback.add({
@@ -143,16 +155,28 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
     }
 
     if (actionType === 'DISPATCH_OFFICER') {
+      // Dashboard / detail pages can dispatch before a case exists: ensure it
+      // first so the item reliably lands in Active Investigations.
+      ensureCaseForConsumer(consumer)
       investigationStore.updateStatus(consumer.id, 'Field Inspection Dispatched', {
         workOrderId,
         officerInCharge: officerName
       })
+      sim.moveToInvestigation(consumer.id)
     }
 
     if (actionType === 'SEND_WARNING') {
+      ensureCaseForConsumer(consumer)
       investigationStore.updateStatus(consumer.id, 'Warning Notice Issued')
+      sim.moveToInvestigation(consumer.id)
     }
 
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Action failed. Please retry.')
+      setIsSubmitting(false)
+      return
+    }
+    setIsSubmitting(false)
     onSuccess()
     onClose()
   }
@@ -345,6 +369,11 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
                     onChange={e => setRecoveredINR(Number(e.target.value))}
                     className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
                   />
+                  {suggestedRecovery != null && (
+                    <p className="mt-1 text-[11px] text-purple-700">
+                      Prefilled from backend Method-A revenue loss (₹{Math.round(suggestedRecovery).toLocaleString('en-IN')}). Editable.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700">Unmetered Energy Recovered (kWh)</label>
@@ -374,6 +403,11 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
           )}
 
           {/* Action Buttons */}
+          {submitError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-700">
+              {submitError}
+            </div>
+          )}
           <div className="flex items-center justify-end gap-2 border-t border-slate-100 pt-3">
             <button
               type="button"
@@ -384,7 +418,8 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
             </button>
             <button
               type="submit"
-              className={`rounded-md px-4 py-2 text-xs font-semibold text-white shadow-sm transition ${
+              disabled={isSubmitting}
+              className={`rounded-md px-4 py-2 text-xs font-semibold text-white shadow-sm transition disabled:opacity-60 ${
                 actionType === 'DISMISS'
                   ? 'bg-emerald-600 hover:bg-emerald-700'
                   : actionType === 'SEND_WARNING'
@@ -394,10 +429,7 @@ export const IncidentActionModal: React.FC<IncidentActionModalProps> = ({
                   : 'bg-purple-600 hover:bg-purple-700'
               }`}
             >
-              {actionType === 'DISMISS' && 'Confirm Dismissal'}
-              {actionType === 'SEND_WARNING' && 'Dispatch Notice'}
-              {actionType === 'DISPATCH_OFFICER' && 'Issue Work Order & Dispatch'}
-              {actionType === 'RESOLVE' && 'Finalize Case'}
+              {isSubmitting ? 'Working…' : actionType === 'DISMISS' ? 'Confirm Dismissal' : actionType === 'SEND_WARNING' ? 'Dispatch Notice' : actionType === 'DISPATCH_OFFICER' ? 'Issue Work Order & Dispatch' : 'Finalize Case'}
             </button>
           </div>
         </form>

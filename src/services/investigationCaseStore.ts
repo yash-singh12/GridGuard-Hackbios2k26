@@ -1,4 +1,5 @@
 import type { Alert } from '../types'
+import { safeGet, safeSet, isLocalStorageAvailable } from './storage'
 
 const INVESTIGATION_STORAGE_KEY = 'gridguard_investigation_cases_v1'
 
@@ -27,41 +28,76 @@ class InvestigationCaseStore {
     this.load()
   }
 
-  private load() {
-    try {
-      const raw = localStorage.getItem(INVESTIGATION_STORAGE_KEY)
-      if (raw) {
-        this.cases = JSON.parse(raw)
-      } else {
-        // Seed with a default active investigation for C-017 so judges see it immediately
-        this.cases = [
-          {
-            alertId: 'AL-1001',
-            consumerId: 'C-017',
-            transformerId: 'T-02',
-            event: 'Anomaly: Probable theft/tampering',
-            risk: 'Critical',
-            priority: 'P1',
-            score: 94,
-            cause: 'Probable theft/tampering',
-            status: 'Field Inspection Dispatched',
-            addedAt: '2026-10-07 15:30:00',
-            workOrderId: 'WO-8891',
-            officerInCharge: 'Insp. Rajesh Verma (Squad #2)'
-          }
-        ]
-        this.save()
+  private defaultSeed(): InvestigationCase[] {
+    // Default active investigation for C-017 so first run shows the workflow.
+    return [
+      {
+        alertId: 'AL-1001',
+        consumerId: 'C-017',
+        transformerId: 'T-02',
+        event: 'Anomaly: Probable theft/tampering',
+        risk: 'Critical',
+        priority: 'P1',
+        score: 94,
+        cause: 'Probable theft/tampering',
+        status: 'Field Inspection Dispatched',
+        addedAt: '2026-10-07 15:30:00',
+        workOrderId: 'WO-8891',
+        officerInCharge: 'Insp. Rajesh Verma (Squad #2)'
       }
-    } catch {
-      this.cases = []
+    ]
+  }
+
+  private load() {
+    const raw = safeGet(INVESTIGATION_STORAGE_KEY)
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          this.cases = parsed
+          return
+        }
+        console.warn('[investigationStore] stored value is not a list; reseeding.')
+      } catch {
+        console.warn('[investigationStore] stored value is corrupt; reseeding.')
+      }
+      // Corrupt/unexpected data: reseed instead of showing a permanent 0.
+      this.cases = this.defaultSeed()
+      this.save()
+    } else if (!isLocalStorageAvailable()) {
+      // Storage blocked: keep an in-memory seed so the page is usable;
+      // changes last until refresh (banner in App.tsx explains why).
+      this.cases = this.defaultSeed()
+    } else {
+      this.cases = this.defaultSeed()
+      this.save()
     }
   }
 
   private save() {
-    try {
-      localStorage.setItem(INVESTIGATION_STORAGE_KEY, JSON.stringify(this.cases))
-    } catch {}
+    safeSet(INVESTIGATION_STORAGE_KEY, JSON.stringify(this.cases))
     this.notify()
+  }
+
+  /** Persistence available? If false, data is in-memory and lost on refresh. */
+  isPersistent(): boolean {
+    return isLocalStorageAvailable()
+  }
+
+  /** Explicit demo reset: back to the first-run seed (clears user cases). */
+  resetToSeed() {
+    this.cases = this.defaultSeed()
+    this.save()
+  }
+
+  /** Explicit demo recovery: re-add the sample C-017 case (reopened audit). */
+  restoreSample(): InvestigationCase {
+    const existing = this.getByConsumer('C-017')
+    if (existing) return existing
+    const [seed] = this.defaultSeed()
+    this.cases = [seed, ...this.cases]
+    this.save()
+    return seed
   }
 
   private notify() {
@@ -75,6 +111,39 @@ class InvestigationCaseStore {
 
   getAll(): InvestigationCase[] {
     return this.cases
+  }
+
+  has(consumerId: string): boolean {
+    return this.cases.some(c => c.consumerId === consumerId)
+  }
+
+  getByConsumer(consumerId: string): InvestigationCase | undefined {
+    return this.cases.find(c => c.consumerId === consumerId)
+  }
+
+  getActiveConsumerIds(): Set<string> {
+    return new Set(this.cases.map(c => c.consumerId))
+  }
+
+  // Ensure a case exists before DISPATCH / WARNING transitions that are
+  // triggered outside the investigations queue (dashboard, detail page).
+  ensureFromConsumer(input: { consumerId: string; transformerId: string; event: string; risk: string; priority: string; score: number; cause: string; alertId?: string; addedAt?: string }) {
+    if (this.has(input.consumerId)) return this.getByConsumer(input.consumerId)!
+    const nc: InvestigationCase = {
+      alertId: input.alertId || ('AL-' + input.consumerId),
+      consumerId: input.consumerId,
+      transformerId: input.transformerId,
+      event: input.event,
+      risk: input.risk,
+      priority: input.priority,
+      score: input.score,
+      cause: input.cause,
+      status: 'Under Review',
+      addedAt: input.addedAt || new Date().toISOString().replace('T', ' ').substring(0, 19),
+    }
+    this.cases = [nc, ...this.cases]
+    this.save()
+    return nc
   }
 
   addFromAlert(alert: Alert) {

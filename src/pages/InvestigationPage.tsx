@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   ComposedChart,
@@ -28,11 +28,29 @@ import {
   Activity,
   Info
 } from 'lucide-react'
-import { api, MONTHS, estLoss, ALLC } from '../mock'
+import { api, MONTHS, estLoss, ALLC, WORLD } from '../mock'
 import type { Consumer, OperatorActionType, Risk, Priority } from '../types'
 import { IncidentActionModal } from '../components/investigation/IncidentActionModal'
 import { exportForensicPDF } from '../components/investigation/ForensicReportExport'
+import { GeminiAnalysisSection } from '../components/investigation/GeminiAnalysisSection'
 import { aiFeedback } from '../services/aiFeedbackStore'
+import { investigationStore } from '../services/investigationCaseStore'
+import { assessConsumerSeries, type ConsumerAssessment } from '../services/assessmentClient'
+import type { IncidentActionLog } from '../types'
+
+const FRONTEND_CAUSE_TO_BACKEND: Record<string, string> = {
+  'Probable theft/tampering': 'Theft',
+  'Meter malfunction': 'Meter Fault',
+  'Communication failure': 'Comms Failure',
+}
+
+function monthLabelToISO(m: string): string {
+  // Mock labels run Oct..Dec then Jan..Sep; anchor to the 2025-26 cycle.
+  const order = ['Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep']
+  const year = order.indexOf(m) <= 2 ? 2025 : 2026
+  const mm = String(order.indexOf(m) <= 2 ? order.indexOf(m) + 10 : order.indexOf(m) - 2).padStart(2, '0')
+  return `${year}-${mm}-01`
+}
 
 export const InvestigationPage: React.FC = () => {
   const { id } = useParams<{ id: string }>()
@@ -40,7 +58,67 @@ export const InvestigationPage: React.FC = () => {
 
   const [modalAction, setModalAction] = useState<OperatorActionType | null>(null)
   const [showPeerMedian, setShowPeerMedian] = useState(true)
-  const [actionHistoryVersion, setActionHistoryVersion] = useState(0)
+  const [toast, setToast] = useState<string | null>(null)
+  const [actionHistory, setActionHistory] = useState<IncidentActionLog[]>(() =>
+    aiFeedback.getByConsumer(id || 'C-017')
+  )
+  const [caseStatus, setCaseStatus] = useState<string | null>(() =>
+    investigationStore.getByConsumer(id || 'C-017')?.status ?? null
+  )
+
+  useEffect(() => {
+    const cid = id || 'C-017'
+    const refresh = () => {
+      setActionHistory(aiFeedback.getByConsumer(cid))
+      setCaseStatus(investigationStore.getByConsumer(cid)?.status ?? null)
+    }
+    refresh()
+    const u1 = aiFeedback.subscribe(refresh)
+    const u2 = investigationStore.subscribe(refresh)
+    return () => {
+      u1()
+      u2()
+    }
+  }, [id])
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // Backend Method-A assessment: theft start date + financial loss/penalty.
+  // Series is derived from the frontend 12-month history (rolling baseline =
+  // sanctioned baseline; null months = comms failure). Null when backend offline.
+  const [assessment, setAssessment] = useState<ConsumerAssessment | null>(null)
+  const [assessmentLoading, setAssessmentLoading] = useState(false)
+
+  useEffect(() => {
+    const c = api.consumer(id || 'C-017', 'A')
+    if (!c) return
+    let cancelled = false
+    setAssessmentLoading(true)
+    const readings = MONTHS.map((m, i) => ({
+      timestamp: monthLabelToISO(m),
+      kwh_recorded: c.hist[i],
+      rolling_7d_avg: c.base,
+      peer_group_avg: c.peer[i] ?? c.base,
+      comm_status: c.hist[i] == null ? 'Failed' : 'OK',
+      meter_status: c.flags.meter ? 'Faulty' : 'OK',
+    }))
+    assessConsumerSeries(c.id, readings, {
+      event_label: FRONTEND_CAUSE_TO_BACKEND[c.d.top] ?? 'Normal',
+      tariff: c.tariff,
+    }).then(res => {
+      if (!cancelled) {
+        setAssessment(res)
+        setAssessmentLoading(false)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [id])
 
   const consumer = api.consumer(id || 'C-017', 'A')
 
@@ -56,7 +134,8 @@ export const InvestigationPage: React.FC = () => {
   }
 
   const d = consumer.d
-  const actionHistory = aiFeedback.getByConsumer(consumer.id)
+  const latestAction = actionHistory[0]
+  const isClosed = !!latestAction && (latestAction.action === 'RESOLVE' || latestAction.action === 'DISMISS')
 
   const chartData = MONTHS.map((m, i) => ({
     m,
@@ -69,6 +148,34 @@ export const InvestigationPage: React.FC = () => {
 
   return (
     <div className="space-y-4 font-sans">
+      {toast && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-900 shadow-sm">
+          {toast}
+        </div>
+      )}
+      {/* Pipeline status banner: shows where this item currently lives */}
+      <div
+        className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-2.5 text-xs shadow-sm ${
+          isClosed
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+            : caseStatus
+            ? 'border-blue-200 bg-blue-50 text-blue-900'
+            : 'border-slate-200 bg-white text-slate-600'
+        }`}
+      >
+        <span>
+          {isClosed ? (
+            <>Case completed ({latestAction.action.replace('_', ' ')}) — this item now lives in <button onClick={() => navigate('/history')} className="font-semibold underline">Incident History</button>.</>
+          ) : caseStatus ? (
+            <>Under Investigation — current status: <strong>{caseStatus}</strong>. Track it in <button onClick={() => navigate('/investigations')} className="font-semibold underline">Active Investigations</button>.</>
+          ) : (
+            <>Not yet under investigation. Dispatching or warning from this page will move it to Active Investigations.</>
+          )}
+        </span>
+        <span className="font-mono text-[11px] opacity-70">
+          {actionHistory.length} logged action{actionHistory.length === 1 ? '' : 's'}
+        </span>
+      </div>
       {/* Top Header & Action Controls (Light Theme) */}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-center gap-3">
@@ -81,6 +188,18 @@ export const InvestigationPage: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <span className="font-mono text-xl font-bold text-slate-900">{consumer.id}</span>
+              <select
+                value={consumer.id}
+                onChange={e => navigate(`/investigate/${e.target.value}`)}
+                aria-label="Select Consumer for Investigation"
+                className="rounded-md border border-slate-300 bg-white px-2 py-0.5 font-mono text-xs font-semibold text-slate-800 shadow-sm hover:border-blue-500 focus:border-blue-500 focus:outline-none"
+              >
+                {WORLD.A.cons.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {c.id} — {c.cat} ({c.d.risk} · {c.d.top})
+                  </option>
+                ))}
+              </select>
               <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
                 {consumer.cat}
               </span>
@@ -162,6 +281,82 @@ export const InvestigationPage: React.FC = () => {
           <div className="mt-1 font-mono text-2xl font-bold text-blue-600">{consumer.flags.trGap}%</div>
           <div className="text-[11px] text-slate-500">Unexplained energy on {consumer.tr}</div>
         </div>
+      </div>
+
+      {/* Backend Assessment: theft start date + financial loss/penalty (Method A) */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+          <div>
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+              Backend Assessment — Theft Start &amp; Financial Loss (Method A)
+            </h3>
+            <p className="text-[11px] text-slate-500">
+              {assessmentLoading
+                ? 'Contacting Python backend…'
+                : assessment
+                ? `Priority: ${assessment.priority} · Confidence: ${assessment.theft_start ? `${Math.round(assessment.theft_start.confidence * 100)}%` : '—'}`
+                : 'Backend offline — showing frontend estimates only'}
+            </p>
+          </div>
+          <span className="rounded bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-600">
+            {assessment ? 'LIVE PYTHON' : assessmentLoading ? '…' : 'OFFLINE'}
+          </span>
+        </div>
+        {assessmentLoading ? (
+          <div className="mt-3 text-xs text-slate-500">Loading assessment…</div>
+        ) : !assessment ? (
+          <div className="mt-3 text-xs text-slate-500">
+            Start the backend (<span className="font-mono">uvicorn server:app --port 8000</span> in{' '}
+            <span className="font-mono">gridguard/backend</span>) to see the detected theft-start date, revenue loss and indicative penalty here.
+          </div>
+        ) : (
+          <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <div className="text-xs text-slate-500 font-medium">Theft Start Date</div>
+              <div className="mt-1 font-mono text-lg font-bold text-red-600">
+                {assessment.theft_start?.theft_start_timestamp
+                  ? new Date(assessment.theft_start.theft_start_timestamp).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+                  : assessment.theft_start?.comm_failure_overlap
+                  ? 'Not theft'
+                  : 'No drop found'}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {assessment.theft_start?.comm_failure_overlap
+                  ? 'Low readings overlap a comms failure (data issue)'
+                  : assessment.theft_start?.theft_start_timestamp
+                  ? `Sustained ${assessment.theft_start.consecutive_low_periods}-period drop`
+                  : assessment.loss_skipped_reason ?? 'No sustained drop detected'}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 font-medium">Energy Lost</div>
+              <div className="mt-1 font-mono text-lg font-bold text-slate-800">
+                {assessment.loss ? `${assessment.loss.estimated_loss_kwh.toLocaleString('en-IN')} kWh` : '—'}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {assessment.loss
+                  ? `Baseline ${assessment.loss.baseline_per_period} kWh × ${assessment.loss.periods_affected} periods`
+                  : 'Computed for Theft cases only'}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 font-medium">Revenue Loss</div>
+              <div className="mt-1 font-mono text-lg font-bold text-slate-800">
+                {assessment.loss ? `₹${assessment.loss.revenue_loss.toLocaleString('en-IN')}` : '—'}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {assessment.loss ? `@ ₹${assessment.loss.tariff_used}/kWh` : '—'}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 font-medium">Indicative Penalty (2×)</div>
+              <div className="mt-1 font-mono text-lg font-bold text-purple-700">
+                {assessment.loss ? `₹${assessment.loss.indicative_penalty.toLocaleString('en-IN')}` : '—'}
+              </div>
+              <div className="text-[11px] text-slate-500">Prefilled in Resolve Case</div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main Analysis: Baseline Chart + Direct Why Flagged Explanation */}
@@ -257,90 +452,58 @@ export const InvestigationPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Direct Plain-English Evidence & Action History */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Why was this flagged? */}
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 border-b border-slate-100 pb-2">
-            Why was this flagged? (Plain-English Evidence)
-          </h3>
-          <div className="mt-3 space-y-2">
-            {d.evidence.map(ev => (
-              <div
-                key={ev.signal}
-                className="flex items-start justify-between rounded-lg border border-slate-100 bg-slate-50 p-2.5 text-xs"
-              >
-                <div className="flex items-start gap-2">
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                      ev.direction === 'supports'
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : 'bg-red-100 text-red-800'
-                    }`}
-                  >
-                    {ev.direction === 'supports' ? 'SUPPORTS' : 'CONTRADICTS'}
-                  </span>
-                  <div>
-                    <div className="font-semibold text-slate-800">{ev.signal}</div>
-                    <div className="text-slate-600 text-[11px]">{ev.text}</div>
-                  </div>
-                </div>
-                <span className="font-mono text-slate-400">weight: {ev.weight}</span>
-              </div>
-            ))}
+      {/* Dedicated Gemini AI Plain-English Analysis Subsection */}
+      <GeminiAnalysisSection consumer={consumer} />
+
+      {/* Action History Trail & AI Retraining Log */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+          <div className="flex items-center gap-1.5">
+            <History className="text-purple-600" size={16} />
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800">
+              Action History & AI Retraining Feedback
+            </h3>
           </div>
+          <span className="text-[10px] text-slate-500">{actionHistory.length} actions</span>
         </div>
 
-        {/* Action History Trail & AI Retraining Log */}
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-            <div className="flex items-center gap-1.5">
-              <History className="text-purple-600" size={16} />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800">
-                Action History & AI Retraining Feedback
-              </h3>
+        <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
+          {actionHistory.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-500">
+              No field actions taken yet for {consumer.id}. Click "Send Field Officer", "Send Warning", or "Dismiss" above to record action.
             </div>
-            <span className="text-[10px] text-slate-500">{actionHistory.length} actions</span>
-          </div>
-
-          <div className="mt-3 space-y-2 max-h-64 overflow-y-auto">
-            {actionHistory.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-slate-200 p-6 text-center text-xs text-slate-500">
-                No field actions taken yet for {consumer.id}. Click "Send Field Officer", "Send Warning", or "Dismiss" above to record action.
-              </div>
-            ) : (
-              actionHistory.map(a => (
-                <div key={a.id} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-slate-500">{a.timestamp}</span>
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                        a.action === 'DISPATCH_OFFICER'
-                          ? 'bg-red-100 text-red-800'
-                          : a.action === 'SEND_WARNING'
-                          ? 'bg-blue-100 text-blue-800'
-                          : a.action === 'RESOLVE'
-                          ? 'bg-purple-100 text-purple-800'
-                          : 'bg-emerald-100 text-emerald-800'
-                      }`}
-                    >
-                      {a.action}
-                    </span>
-                  </div>
-                  <div className="mt-1 font-semibold text-slate-800">
-                    {a.dispatch && `Work Order ${a.dispatch.workOrderId} · Squad: ${a.dispatch.teamName}`}
-                    {a.warning && `Notice ${a.warning.noticeNumber} · Sent via ${a.warning.channel}`}
-                    {a.dismiss && `Dismissed: ${a.dismiss.reason}`}
-                    {a.resolve && `Resolved: ${a.resolve.outcome} (₹${a.resolve.recoveredRevenueINR.toLocaleString('en-IN')} recovered)`}
-                  </div>
-                  <div className="mt-1 flex items-center justify-between text-[10px] text-slate-500">
-                    <span>Officer: {a.operatorId}</span>
-                    <span className="text-emerald-700 font-medium">✓ Logged to AI retraining store</span>
-                  </div>
+          ) : (
+            actionHistory.map(a => (
+              <div key={a.id} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-slate-500">{a.timestamp}</span>
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                      a.action === 'DISPATCH_OFFICER'
+                        ? 'bg-red-100 text-red-800'
+                        : a.action === 'SEND_WARNING'
+                        ? 'bg-blue-100 text-blue-800'
+                        : a.action === 'RESOLVE'
+                        ? 'bg-purple-100 text-purple-800'
+                        : 'bg-emerald-100 text-emerald-800'
+                    }`}
+                  >
+                    {a.action}
+                  </span>
                 </div>
-              ))
-            )}
-          </div>
+                <div className="mt-1 font-semibold text-slate-800">
+                  {a.dispatch && `Work Order ${a.dispatch.workOrderId} · Squad: ${a.dispatch.teamName}`}
+                  {a.warning && `Notice ${a.warning.noticeNumber} · Sent via ${a.warning.channel}`}
+                  {a.dismiss && `Dismissed: ${a.dismiss.reason}`}
+                  {a.resolve && `Resolved: ${a.resolve.outcome} (₹${a.resolve.recoveredRevenueINR.toLocaleString('en-IN')} recovered)`}
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[10px] text-slate-500">
+                  <span>Officer: {a.operatorId}</span>
+                  <span className="text-emerald-700 font-medium">✓ Logged to AI retraining store</span>
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -350,8 +513,20 @@ export const InvestigationPage: React.FC = () => {
           consumer={consumer}
           actionType={modalAction}
           isOpen={true}
+          suggestedRecovery={assessment?.loss?.revenue_loss ?? null}
           onClose={() => setModalAction(null)}
-          onSuccess={() => setActionHistoryVersion(v => v + 1)}
+          onSuccess={() => {
+            const done = modalAction
+            setActionHistory(aiFeedback.getByConsumer(consumer.id))
+            setCaseStatus(investigationStore.getByConsumer(consumer.id)?.status ?? null)
+            setToast(
+              done === 'RESOLVE' || done === 'DISMISS'
+                ? `${consumer.id} completed and moved to Incident History.`
+                : done === 'DISPATCH_OFFICER'
+                ? `${consumer.id} moved to Active Investigations (Field Inspection Dispatched).`
+                : `${consumer.id} moved to Active Investigations (Warning Notice Issued).`
+            )
+          }}
         />
       )}
     </div>

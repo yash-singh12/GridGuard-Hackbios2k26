@@ -6,3 +6,6 @@ scikit-learn>=1.4.0
 joblib>=1.3.0
 pandas>=2.0.0
 numpy>=1.24.0
+pyarrow>=14.0.0  # parquet support for lgbm_features/labels files
+pytest>=8.0.0  # tests only
+httpx>=0.27.0  # API tests only (TestClient transport)

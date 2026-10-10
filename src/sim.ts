@@ -42,6 +42,9 @@ export const sim={
    raised.forEach(k=>k.startsWith(consumerId)&&raised.delete(k));
    set({alerts:s.alerts.filter(a=>a.consumer!==consumerId),ov:{...s.ov,[consumerId]:'Normal Consumption'}})
  },
+ moveToInvestigation:(consumerId:string)=>{
+   set({alerts:s.alerts.filter(a=>a.consumer!==consumerId)})
+ },
  stage:(id:string,v:string)=>set({stage:{...s.stage,[id]:v}}),outcome:(id:string,v:string)=>set({outcome:{...s.outcome,[id]:v}})}
 export const useSim=()=>useSyncExternalStore(f=>{subs.add(f);return()=>{subs.delete(f)}},()=>s)
 export type {Priority}
