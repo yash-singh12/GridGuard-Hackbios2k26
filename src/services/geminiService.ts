@@ -3,6 +3,7 @@ import { estLoss } from '../mock'
 
 const LOCAL_STORAGE_KEY = 'gridguard_gemini_api_key'
 const DEFAULT_MODEL = 'gemini-2.0-flash'
+const BACKEND_URL = (import.meta as any).env?.VITE_API_URL || ''
 
 export interface GeminiAnalysisResult {
   consumerId: string
@@ -249,7 +250,7 @@ export async function analyzeConsumerWithGemini(
 
   // 2. Try backend proxy endpoint (in case backend has GEMINI_API_KEY)
   try {
-    const backendRes = await fetch('http://127.0.0.1:8000/api/gemini/analyze', {
+    const backendRes = await fetch(`${BACKEND_URL}/api/gemini/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
