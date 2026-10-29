@@ -34,12 +34,15 @@ This guide walks you through deploying the **GridGuard AI** prototype on **Amazo
 2. Run the initialization script or copy-paste these commands:
 
 ```bash
-# Update and install Docker + Compose
+# 1. Update and install Docker + Compose
 sudo apt update && sudo apt install -y docker.io docker-compose git
 
-# (Optional recommended) Create 1GB Swap file for memory headroom
+# 2. REQUIRED: Enable 1GB Swap (prevents Out-Of-Memory / code 137 during build)
 sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# Verify swap is active (should show 1.0G under Swap):
+free -h
 ```
 
 ---
@@ -53,8 +56,8 @@ In the same SSH terminal on your instance:
 git clone <YOUR_REPOSITORY_URL> gridguard
 cd gridguard
 
-# 2. Build and launch with Docker Compose
-sudo docker-compose up -d --build
+# 2. Build and launch with BuildKit enabled
+DOCKER_BUILDKIT=1 sudo docker-compose up -d --build
 ```
 
 That's it! In about 1–2 minutes:
